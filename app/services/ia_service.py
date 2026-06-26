@@ -1,85 +1,64 @@
-from groq import Groq
-import os
-import json
-from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException
+from app.database.database import SessionLocal
+from app.models.inventario import Inventario
+from app.models.producto import Producto
+from app.services.ia_service import sugerir_recetas
 
-load_dotenv()
-
-cliente = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
+router = APIRouter(
+    prefix="/ia",
+    tags=["IA"]
 )
 
-def sugerir_recetas(productos: list[dict]):
+@router.get("/sugerir/{usuario_id}")
+def sugerir(usuario_id: int):
+    """
+    Sugiere recetas basadas en los productos del inventario del usuario.
 
-    lista_texto = ""
+    - **usuario_id**: ID del usuario cuyo inventario se consultará.
+    - Retorna una lista de sugerencias generadas por el servicio de IA.
+    - Lanza 404 si el usuario no tiene productos en su inventario.
+    - Lanza 500 ante cualquier error inesperado del servidor.
+    """
 
-    for p in productos:
-        lista_texto += (
-            f"- id_producto: {p['id_producto']}, "
-            f"nombre: {p['nombre']}, "
-            f"cantidad disponible: {p['cantidad']}\n"
-        )
-
-    prompt = f"""
-        Tengo disponibles los siguientes productos del inventario.
-
-        Cada producto tiene un id_producto que NO debes modificar.
-
-        Productos disponibles:
-
-        {lista_texto}
-
-        Sugiere exactamente 4 recetas utilizando únicamente estos productos.
-
-        Para cada ingrediente debes conservar exactamente el mismo id_producto que aparece en la lista anterior.pero no se necesita mostrar los id_producto
-
-        Nunca inventes ids.
-        Nunca cambies un id.
-        Si utilizas "Pollo", debes devolver el id_producto correspondiente al pollo.
-        Si utilizas "Queso", debes devolver el id_producto correspondiente al queso.
-
-        Responde únicamente un JSON válido con este formato:
-
-        {{
-        "recetas":[
-            {{
-            "titulo":"",
-            "descripcion":"",
-            "ingredientes":[
-                {{
-                "id_producto":0,
-                "nombre":"",
-                "cantidad":""
-                }}
-            ]
-            }}
-        ]
-        }}
-
-        La descripción los pasos a pasos para preparar la receta
-
-        No escribas explicaciones.
-        No escribas markdown.
-        No escribas ```json.
-        Devuelve solamente el objeto JSON.
-        """
-    respuesta = cliente.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.2
-    )
-
-    contenido = respuesta.choices[0].message.content
+    db = SessionLocal()
 
     try:
-        return json.loads(contenido)
-    except json.JSONDecodeError:
-        return {
-            "error": "La IA no devolvió un JSON válido",
-            "respuesta": contenido
-        }
+        # Consulta el inventario del usuario haciendo JOIN con la tabla de productos
+        items = db.query(Inventario, Producto).join(
+            Producto, Inventario.producto_id == Producto.id_producto
+        ).filter(
+            Inventario.usuario_id == usuario_id
+        ).all()
+
+        if not items:
+            raise HTTPException(
+                status_code=404,
+                detail="El usuario no tiene producto en el inventario"
+            )
+
+        # Construye la lista de productos con los datos necesarios para la IA
+        productos = [
+            {
+                "nombre":      producto.nombre,
+                "cantidad":    inventario.cantidad,
+                "id_producto": producto.id_producto
+            }
+            for inventario, producto in items
+        ]
+
+        # Envía los productos al servicio de IA y obtiene las sugerencias
+        respuesta = sugerir_recetas(productos)
+
+        return {"sugerencias": respuesta}
+
+    except HTTPException:
+        raise  # Re-lanza errores HTTP controlados sin modificarlos
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+        db.close()  # Cierra la sesión de BD en cualquier escenario
