@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException
 from app.database.database import SessionLocal
 from app.models.inventario import Inventario
 from app.models.producto import Producto
-from app.services.ia_service import sugerir_recetas
 
 router = APIRouter(
     prefix="/ia",
